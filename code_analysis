@@ -1,0 +1,70 @@
+import streamlit as st
+import ollama
+
+# --- Konfiguracja aplikacji ---
+st.set_page_config(page_title="Analiza SOLID & OWASP", layout="wide")
+st.title("🔎 Analiza kodu: SOLID & OWASP")
+
+# --- Formularz do wklejenia kodu ---
+code = st.text_area("Wklej kod źródłowy do analizy:", height=300, placeholder="Wklej tutaj kod...")
+
+# --- Wybór typu analizy ---
+analysis_type = st.radio(
+    "Wybierz rodzaj analizy:",
+    ["Analiza SOLID", "Analiza OWASP", "Analiza SOLID + OWASP"]
+)
+
+# --- Wybór modelu Ollama ---
+model = st.selectbox("Wybierz model Ollama:", ["codegemma:2b", "gemma3:4b"])
+
+# --- Przycisk analizy ---
+analyze = st.button("Analizuj kod")
+
+# --- Logika analizy ---
+if analyze and code.strip():
+    with st.spinner("Model analizuje kod..."):
+
+        # --- Budowanie promptu na podstawie wyboru ---
+        if analysis_type == "Analiza SOLID":
+            instructions = """
+Przeanalizuj poniższy kod pod kątem zasad SOLID:
+1. Pojedyncza odpowiedzialność
+2. Otwartość/Zamkniętość
+3. Zastępowalność Liskov
+4. Segregacja interfejsów
+5. Odwrócenie zależności
+
+Zidentyfikuj naruszenia, opisz je oraz zaproponuj poprawki.
+"""
+        elif analysis_type == "Analiza OWASP":
+            instructions = """
+Przeanalizuj poniższy kod pod kątem luk bezpieczeństwa z listy OWASP Top 10 (np. SQL Injection, XSS, błędna autoryzacja, niewłaściwe przechowywanie danych itp.).
+
+Zidentyfikuj potencjalne zagrożenia, opisz je i zaproponuj poprawki.
+"""
+        else:
+            instructions = """
+Przeanalizuj poniższy kod pod kątem:
+1. Zasad SOLID (pojedyncza odpowiedzialność, otwartość/zamkniętość, podstawienie Liskov, segregacja interfejsów, odwrócenie zależności).
+2. Potencjalnych zagrożeń bezpieczeństwa zgodnych z OWASP Top 10 (np. SQL Injection, XSS, brak kontroli dostępu, nieprawidłowe uwierzytelnianie itd.).
+
+Dla każdego wykrytego problemu:
+- wskaż lokalizację,
+- opisz dlaczego to jest problem,
+- zaproponuj rozwiązanie.
+"""
+
+        prompt = f"{instructions}\nKod:\n```{code}```"
+
+        response = ollama.chat(
+            model=model,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+
+        st.subheader("📋 Wynik analizy:")
+        st.markdown(response['message']['content'])
+
+elif analyze:
+    st.warning("⚠️ Wklej kod przed uruchomieniem analizy.")
