@@ -1,0 +1,428 @@
+import streamlit as st
+import chromadb
+from chromadb.utils import embedding_functions
+from dotenv import load_dotenv
+import requests
+from bs4 import BeautifulSoup
+import re
+import os
+import openai
+import time
+
+# Konfiguracja strony
+st.set_page_config(
+    page_title="🇫🇷 RAG Wikipedia - Francja",
+    page_icon="🇫🇷",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+load_dotenv()
+
+
+class WikipediaRAG:
+    def __init__(self, db_path="./chroma_db", collection_name="francja_wikipedia"):
+        self.db_path = db_path
+        self.collection_name = collection_name
+        self.client = None
+        self.collection = None
+        self.embedding_fn = None
+
+    def initialize(self):
+        """Inicjalizuje połączenie z bazą danych"""
+        try:
+            # Sprawdzamy klucz OpenAI
+            if not os.getenv("OPENAI_API_KEY"):
+                return False, "Brak klucza OpenAI API. Ustaw OPENAI_API_KEY w pliku .env"
+
+            openai.api_key = os.getenv("OPENAI_API_KEY")
+
+            # Inicjalizacja ChromaDB
+            self.client = chromadb.PersistentClient(path=self.db_path)
+            self.embedding_fn = embedding_functions.OpenAIEmbeddingFunction(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                model_name="text-embedding-3-small"
+            )
+
+            # Sprawdzamy czy kolekcja istnieje
+            try:
+                self.collection = self.client.get_collection(
+                    name=self.collection_name,
+                    embedding_function=self.embedding_fn
+                )
+                return True, f"Załadowano kolekcję z {self.collection.count()} dokumentów"
+            except:
+                return True, "Kolekcja nie istnieje - będzie utworzona"
+
+        except Exception as e:
+            return False, f"Błąd inicjalizacji: {str(e)}"
+
+    def scrape_wikipedia_article(self, url):
+        """Pobiera treść artykułu z Wikipedii"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+
+            soup = BeautifulSoup(response.content, 'html.parser')
+
+            # Próbujemy różne selektory
+            content_selectors = [
+                'div#mw-content-text',
+                'div.mw-parser-output',
+                'div#bodyContent'
+            ]
+
+            content_div = None
+            for selector in content_selectors:
+                content_div = soup.select_one(selector)
+                if content_div:
+                    break
+
+            if not content_div:
+                content_div = soup
+
+            # Czyszczenie
+            for selector in ['.navbox', '.infobox', '.toc', '.references']:
+                for element in content_div.select(selector):
+                    element.decompose()
+
+            for table in content_div.find_all('table'):
+                table.decompose()
+
+            paragraphs = content_div.find_all('p')
+
+            cleaned_paragraphs = []
+            for p in paragraphs:
+                text = p.get_text()
+                text = re.sub(r'\s+', ' ', text).strip()
+                text = re.sub(r'\[[0-9]+\]', '', text)
+
+                if len(text) > 50:
+                    cleaned_paragraphs.append(text)
+
+            return cleaned_paragraphs
+
+        except Exception as e:
+            st.error(f"Błąd pobierania z Wikipedii: {e}")
+            return self.get_fallback_data()
+
+    def get_fallback_data(self):
+        """Dane zapasowe o Francji"""
+        return [
+            "Francja, oficjalnie Republika Francuska – państwo, którego terytorium metropolitalne znajduje się w Europie Zachodniej, oraz które posiada terytoria zamorskie na innych kontynentach.",
+            "Stolicą Francji jest Paryż, a język urzędowy to francuski. Francja jest republiką unitarną o ustroju półprezydenckim.",
+            "Francja graniczy z Belgią, Luksemburgiem, Niemcami, Szwajcarią, Włochami, Monako, Andorą oraz Hiszpanią.",
+            "Pod względem liczby ludności Francja jest drugim największym krajem Unii Europejskiej po Niemczech. Liczba mieszkańców wynosi około 68 milionów.",
+            "Największe miasta to Paryż, Marsylia, Lyon, Tuluza, Nicea, Nantes, Strasburg, Montpellier, Bordeaux i Lille.",
+            "Francja jest członkiem założycielem Unii Europejskiej i jednym z państw członkowskich Strefy Schengen.",
+            "Gospodarka Francji jest jedną z największych na świecie. Specjalizuje się w przemyśle lotniczym, motoryzacyjnym i turystyce.",
+            "Historia Francji sięga czasów starożytnych. Kraj przeszedł przez rewolucję francuską w 1789 roku i okres Napoleona Bonaparte."
+        ]
+
+    def chunk_text(self, text, max_length=500, overlap=50):
+        """Dzieli tekst na chunki"""
+        if len(text) <= max_length:
+            return [text]
+
+        sentences = re.split(r'[.!?]+', text)
+        chunks = []
+        current_chunk = ""
+
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+
+            if len(current_chunk + sentence) <= max_length:
+                current_chunk += sentence + ". "
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence + ". "
+
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+
+        return chunks
+
+    def load_wikipedia_data(self, url="https://pl.wikipedia.org/wiki/Francja", progress_callback=None):
+        """Ładuje dane z Wikipedii"""
+        try:
+            if progress_callback:
+                progress_callback(0.1, "Pobieranie danych z Wikipedii...")
+
+            paragraphs = self.scrape_wikipedia_article(url)
+
+            if not paragraphs:
+                return False, "Nie udało się pobrać danych"
+
+            if progress_callback:
+                progress_callback(0.3, f"Przetwarzanie {len(paragraphs)} paragrafów...")
+
+            # Chunking
+            all_chunks = []
+            for paragraph in paragraphs:
+                chunks = self.chunk_text(paragraph, max_length=600, overlap=100)
+                all_chunks.extend(chunks)
+
+            if progress_callback:
+                progress_callback(0.5, f"Tworzenie kolekcji z {len(all_chunks)} chunków...")
+
+            # Usuwamy starą kolekcję
+            try:
+                self.client.delete_collection(self.collection_name)
+            except:
+                pass
+
+            # Tworzymy nową
+            self.collection = self.client.create_collection(
+                name=self.collection_name,
+                embedding_function=self.embedding_fn
+            )
+
+            # Przygotowujemy dane
+            documents = all_chunks
+            ids = [f"chunk_{i}" for i in range(len(all_chunks))]
+            metadatas = [{"source": "wikipedia_francja", "chunk_id": i} for i in range(len(all_chunks))]
+
+            if progress_callback:
+                progress_callback(0.7, "Dodawanie do bazy wektorowej...")
+
+            # Dodajemy w batches
+            batch_size = 50
+            for i in range(0, len(documents), batch_size):
+                batch_docs = documents[i:i + batch_size]
+                batch_ids = ids[i:i + batch_size]
+                batch_metas = metadatas[i:i + batch_size]
+
+                self.collection.add(
+                    documents=batch_docs,
+                    ids=batch_ids,
+                    metadatas=batch_metas
+                )
+
+                if progress_callback:
+                    progress = 0.7 + (0.2 * (i + batch_size) / len(documents))
+                    progress_callback(progress,
+                                      f"Przetworzono {min(i + batch_size, len(documents))}/{len(documents)} dokumentów")
+
+            if progress_callback:
+                progress_callback(1.0, f"Gotowe! Załadowano {len(documents)} dokumentów")
+
+            return True, f"Pomyślnie załadowano {len(documents)} dokumentów"
+
+        except Exception as e:
+            return False, f"Błąd ładowania danych: {str(e)}"
+
+    def retrieve_relevant_chunks(self, query, n_results=5):
+        """Wyszukuje relevantne chunki"""
+        if not self.collection:
+            return []
+
+        try:
+            results = self.collection.query(
+                query_texts=[query],
+                n_results=n_results
+            )
+            return results['documents'][0] if results['documents'] else []
+        except Exception as e:
+            st.error(f"Błąd wyszukiwania: {e}")
+            return []
+
+    def generate_answer(self, query, context_chunks):
+        """Generuje odpowiedź używając GPT"""
+        if not context_chunks:
+            return "Nie znaleziono relevantnych informacji w bazie wiedzy."
+
+        context = "\n\n".join(context_chunks)
+
+        system_prompt = """Jesteś asystentem AI odpowiadającym na pytania o Francję na podstawie fragmentów z Wikipedii.
+
+INSTRUKCJE:
+1. Odpowiadaj TYLKO na podstawie dostarczonych fragmentów
+2. Jeśli nie ma informacji w kontekście, powiedz że nie masz takich danych
+3. Odpowiadaj po polsku, precyzyjnie i konkretnie
+4. Podawaj liczby i fakty z kontekstu gdy to możliwe
+5. Bądź pomocny i przyjazny"""
+
+        user_prompt = f"""KONTEKST:
+{context}
+
+PYTANIE: {query}
+
+ODPOWIEDŹ:"""
+
+        try:
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=500,
+                temperature=0.3
+            )
+
+            return response.choices[0].message.content.strip()
+
+        except Exception as e:
+            return f"Błąd generowania odpowiedzi: {e}"
+
+    def ask(self, question):
+        """Główna funkcja RAG"""
+        relevant_chunks = self.retrieve_relevant_chunks(question, n_results=5)
+
+        if not relevant_chunks:
+            return "Nie znaleziono relevantnych informacji.", []
+
+        answer = self.generate_answer(question, relevant_chunks)
+        return answer, relevant_chunks
+
+
+# Inicjalizacja session state
+if 'rag' not in st.session_state:
+    st.session_state.rag = WikipediaRAG()
+    st.session_state.initialized = False
+    st.session_state.chat_history = []
+
+
+def main():
+    st.title("🇫🇷 RAG Wikipedia - Francja")
+    st.markdown("*System pytań i odpowiedzi oparty na danych z Wikipedii*")
+
+    # Sidebar - konfiguracja
+    with st.sidebar:
+        st.header("⚙️ Konfiguracja")
+
+        # Status inicjalizacji
+        if not st.session_state.initialized:
+            st.warning("🔄 System nie został zainicjalizowany")
+
+            if st.button("🚀 Inicjalizuj system", type="primary"):
+                with st.spinner("Inicjalizacja..."):
+                    success, message = st.session_state.rag.initialize()
+                    if success:
+                        st.session_state.initialized = True
+                        st.success(f"✅ {message}")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {message}")
+        else:
+            st.success("✅ System zainicjalizowany")
+
+            # Informacje o bazie
+            if st.session_state.rag.collection:
+                count = st.session_state.rag.collection.count()
+                st.info(f"📊 Dokumentów w bazie: {count}")
+
+                if count == 0:
+                    st.warning("Baza jest pusta - załaduj dane z Wikipedii")
+
+            # Ładowanie danych
+            st.header("📥 Dane")
+
+            wikipedia_url = st.text_input(
+                "URL Wikipedii:",
+                "https://pl.wikipedia.org/wiki/Francja"
+            )
+
+            if st.button("🔄 Załaduj/Odśwież dane"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                def progress_callback(progress, message):
+                    progress_bar.progress(progress)
+                    status_text.text(message)
+
+                success, message = st.session_state.rag.load_wikipedia_data(
+                    wikipedia_url,
+                    progress_callback
+                )
+
+                if success:
+                    st.success(f"✅ {message}")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(f"❌ {message}")
+
+        # Wyczyść historię
+        if st.button("🗑️ Wyczyść historię"):
+            st.session_state.chat_history = []
+            st.rerun()
+
+    # Główny interfejs
+    if not st.session_state.initialized:
+        st.info("👈 Rozpocznij od inicjalizacji systemu w bocznym panelu")
+        return
+
+    if not st.session_state.rag.collection or st.session_state.rag.collection.count() == 0:
+        st.warning("📥 Załaduj najpierw dane z Wikipedii używając bocznego panelu")
+        return
+
+    # Chat interface
+    st.header("💬 Zadaj pytanie o Francję")
+
+    # Przykładowe pytania
+    st.subheader("💡 Przykładowe pytania:")
+    example_questions = [
+        "Jaka jest stolica Francji?",
+        "Ile mieszkańców ma Francja?",
+        "Jakie są największe miasta Francji?",
+        "Z jakimi krajami graniczy Francja?",
+        "Jaki jest system polityczny Francji?",
+        "Opowiedz o gospodarce Francji"
+    ]
+
+    cols = st.columns(2)
+    for i, question in enumerate(example_questions):
+        col = cols[i % 2]
+        if col.button(f"❓ {question}", key=f"example_{i}"):
+            st.session_state.current_question = question
+
+    # Input dla pytania
+    user_question = st.text_input(
+        "Twoje pytanie:",
+        value=st.session_state.get('current_question', ''),
+        placeholder="Wpisz swoje pytanie o Francję..."
+    )
+
+    if st.button("🔍 Zadaj pytanie", type="primary") and user_question:
+        with st.spinner("Szukam odpowiedzi..."):
+            answer, sources = st.session_state.rag.ask(user_question)
+
+            # Dodaj do historii
+            st.session_state.chat_history.append({
+                'question': user_question,
+                'answer': answer,
+                'sources': sources
+            })
+
+            # Wyczyść current_question
+            if 'current_question' in st.session_state:
+                del st.session_state.current_question
+
+            st.rerun()
+
+    # Historia czatu
+    if st.session_state.chat_history:
+        st.header("📝 Historia rozmowy")
+
+        for i, chat in enumerate(reversed(st.session_state.chat_history)):
+            with st.expander(f"❓ {chat['question']}", expanded=(i == 0)):
+                st.markdown(f"**Odpowiedź:** {chat['answer']}")
+
+                if chat['sources']:
+                    st.markdown("**Źródła:**")
+                    for j, source in enumerate(chat['sources'][:3]):
+                        with st.container():
+                            st.caption(f"Źródło {j + 1}:")
+                            st.text(source[:200] + "..." if len(source) > 200 else source)
+
+
+if __name__ == "__main__":
+    main()
