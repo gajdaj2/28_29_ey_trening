@@ -1,0 +1,47 @@
+from openai import OpenAI
+client = OpenAI()
+
+response = client.responses.create(
+  model="gpt-4o",
+  input=[
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Jestes asystentem"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Odpowiedz mi o sobie "
+        }
+      ]
+    },
+    {
+      "id": "msg_683959f6bf9081a29d7ec57fea5cd7dc0c2c7662f0d78251",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Jestem asystentem AI stworzonym do pomagania w różnych zadaniach, odpowiadania na pytania i dostarczania informacji na wiele tematów. Jak mogę Ci pomóc?"
+        }
+      ]
+    }
+  ],
+  text={
+    "format": {
+      "type": "text"
+    }
+  },
+  reasoning={},
+  tools=[],
+  temperature=1,
+  max_output_tokens=2048,
+  top_p=1,
+  store=True
+)
